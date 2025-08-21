@@ -5,23 +5,18 @@ on:
     branches:
       - main
       - master
-      - dev  # Trigger only on changes to the main, master, or dev branches
+      - dev
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write  # Needed for pushing to GHCR
 
     steps:
-      - name: Checkout base branch (target branch)
+      - name: Checkout code
         uses: actions/checkout@v3
-        with:
-          ref: ${{ github.ref }}  # Checkout the branch that received the merge
-
-      - name: Ensure correct branch is checked out
-        run: |
-          git checkout ${{ github.ref }}
-          git pull origin ${{ github.ref }}
-          echo "Current branch: $(git branch --show-current)"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -31,20 +26,37 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set image tag
+      - name: Set image tags per branch
+        id: vars
         run: |
-          BRANCH_NAME=${{ github.ref_name }}  
           COMMIT_SHA=$(git rev-parse --short HEAD)
-          IMAGE_TAG="ghcr.io/${{ github.repository_owner }}/$BRANCH_NAME:$COMMIT_SHA"
-          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+          IMAGE_BASE="ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}"
+
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            ENV_TAG="prod"
+          elif [ "${{ github.ref_name }}" = "master" ]; then
+            ENV_TAG="staging"
+          elif [ "${{ github.ref_name }}" = "dev" ]; then
+            ENV_TAG="dev"
+          else
+            ENV_TAG="other"
+          fi
+
+          IMAGE_TAG_COMMIT="$IMAGE_BASE:$ENV_TAG-$COMMIT_SHA"
+          IMAGE_TAG_LATEST="$IMAGE_BASE:$ENV_TAG-latest"
+
+          echo "IMAGE_TAG_COMMIT=$IMAGE_TAG_COMMIT" >> $GITHUB_ENV
+          echo "IMAGE_TAG_LATEST=$IMAGE_TAG_LATEST" >> $GITHUB_ENV
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          tags: ${{ env.IMAGE_TAG }}
+          tags: |
+            ${{ env.IMAGE_TAG_COMMIT }}
+            ${{ env.IMAGE_TAG_LATEST }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
