@@ -93,3 +93,8 @@ jobs:
             ${{ env.IMAGE_TAG_LATEST }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # 7️⃣ Cleanup dangling images in CI
+      - name: Remove dangling images
+        run: |
+          docker image prune -f      
