@@ -97,4 +97,5 @@ jobs:
       # 7️⃣ Cleanup dangling images in CI
       - name: Remove dangling images
         run: |
-          docker image prune -f      
+          docker builder prune -f
+      
