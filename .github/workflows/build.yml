@@ -35,9 +35,9 @@ jobs:
           IMAGE_BASE="ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}"
 
           if [ "${{ github.ref_name }}" = "main" ]; then
-            ENV_TAG="prod"
+            ENV_TAG="stag"
           elif [ "${{ github.ref_name }}" = "master" ]; then
-            ENV_TAG="staging"
+            ENV_TAG="prod"
           elif [ "${{ github.ref_name }}" = "dev" ]; then
             ENV_TAG="dev"
           else
