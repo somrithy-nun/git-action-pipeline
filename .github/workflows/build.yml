@@ -30,7 +30,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 4️⃣ Log in to GHCR hello
+      # 4️⃣ Log in to GHCR
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -91,6 +91,5 @@ jobs:
           tags: |
             ${{ env.IMAGE_TAG_VERSION }}
             ${{ env.IMAGE_TAG_LATEST }}
-            ${{ env.IMAGE_TAG_COMMIT }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
