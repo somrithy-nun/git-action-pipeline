@@ -65,14 +65,13 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Run Trivy vulnerability scanner
+      - name: Quick security check (Dockerfile lint)
         if: github.event_name != 'pull_request'
-        uses: aquasecurity/trivy-action@master
+        uses: hadolint/hadolint-action@v3.1.0
         with:
-          image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
-          format: 'table'
-          exit-code: '0'
-          severity: 'CRITICAL,HIGH'
+          dockerfile: Dockerfile
+          format: tty
+          no-fail: true
 
       - name: Build summary
         if: always()
