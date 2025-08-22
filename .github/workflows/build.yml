@@ -6,6 +6,20 @@ on:
       - master
       - main
       - dev
+  pull_request:
+    branches:
+      - master
+      - main
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: 'Force rebuild without cache'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
 
 jobs:
   docker:
@@ -13,52 +27,200 @@ jobs:
     permissions:
       contents: read
       packages: write
+      security-events: write # For security scanning
+      pull-requests: write   # For PR comments
+
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-tags: ${{ steps.meta.outputs.tags }}
 
     steps:
       # Checkout repo
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      # Set up Docker Buildx
+      # Set up Docker Buildx with advanced features
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: image=moby/buildkit:buildx-stable-1
 
       # Log in to GHCR
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Define Docker image tags
-      - name: Set image tags
-        id: vars
-        run: |
-          IMAGE_BASE="ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}"
-          COMMIT_SHA=$(git rev-parse --short HEAD)
+      # Extract metadata and generate tags
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}
+          tags: |
+            # Environment-based tags
+            type=raw,value=prod-latest,enable={{is_default_branch}}
+            type=raw,value=prod-{{sha}},enable={{is_default_branch}}
+            type=raw,value=staging-latest,enable=${{ github.ref_name == 'main' && github.ref_name != github.event.repository.default_branch }}
+            type=raw,value=staging-{{sha}},enable=${{ github.ref_name == 'main' && github.ref_name != github.event.repository.default_branch }}
+            type=raw,value=dev-latest,enable=${{ github.ref_name == 'dev' }}
+            type=raw,value=dev-{{sha}},enable=${{ github.ref_name == 'dev' }}
+            # PR tags
+            type=ref,event=pr,prefix=pr-
+            # Date tag for releases
+            type=raw,value={{date 'YYYY-MM-DD'}}-{{sha}}
+          labels: |
+            org.opencontainers.image.title=${{ github.event.repository.name }}
+            org.opencontainers.image.description=${{ github.event.repository.description }}
+            org.opencontainers.image.url=${{ github.event.repository.html_url }}
+            org.opencontainers.image.source=${{ github.event.repository.clone_url }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+            org.opencontainers.image.revision=${{ github.sha }}
 
-          case "${{ github.ref_name }}" in
-            master) ENV="prod" ;;
-            main) ENV="staging" ;;
-            dev) ENV="dev" ;;
-            *) ENV="unknown" ;;
-          esac
+      # Multi-stage security scanning before build
+      - name: Run Dockerfile linting
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          format: sarif
+          output-file: hadolint-results.sarif
+          no-fail: true
 
-          IMAGE_TAG_LATEST="$IMAGE_BASE:$ENV-latest"
-          IMAGE_TAG_COMMIT="$IMAGE_BASE:$ENV-$COMMIT_SHA"
-
-          echo "IMAGE_TAG_LATEST=$IMAGE_TAG_LATEST" >> $GITHUB_ENV
-          echo "IMAGE_TAG_COMMIT=$IMAGE_TAG_COMMIT" >> $GITHUB_ENV
-
-      # Build & push
+      # Build and push Docker image
       - name: Build and push Docker image
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
-          push: true
-          tags: |
-            ${{ env.IMAGE_TAG_LATEST }}
-            ${{ env.IMAGE_TAG_COMMIT }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          no-cache: ${{ github.event.inputs.force_rebuild == 'true' }}
+          build-args: |
+            BUILDTIME=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
+            VERSION=${{ github.ref_name }}
+            REVISION=${{ github.sha }}
+
+      # Security scanning of the built image
+      - name: Run Trivy vulnerability scanner
+        if: github.event_name != 'pull_request'
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}:${{ github.ref_name }}-${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      # Upload security scan results
+      - name: Upload Trivy scan results to GitHub Security tab
+        if: github.event_name != 'pull_request'
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      # Upload Hadolint results
+      - name: Upload Hadolint scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'hadolint-results.sarif'
+
+      # Generate build summary
+      - name: Generate build summary
+        if: always()
+        run: |
+          echo "## 🐳 Docker Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Repository** | ${{ github.repository }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch/Tag** | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit SHA** | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Actor** | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Event** | ${{ github.event_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Generated Tags:" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 🔍 Image Details:" >> $GITHUB_STEP_SUMMARY
+            echo "- **Digest**: \`${{ steps.build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **Registry**: \`${{ env.REGISTRY }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **Platforms**: linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # Comment on PR with build info
+      - name: Comment PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const output = `## 🐳 Docker Build Results
+            
+            **Status**: ✅ Build completed successfully
+            **Branch**: \`${{ github.head_ref }}\`
+            **Commit**: \`${{ github.sha }}\`
+            
+            ### Generated Tags:
+            \`\`\`
+            ${{ steps.meta.outputs.tags }}
+            \`\`\`
+            
+            > 💡 Images are built but not pushed for PR builds. They will be pushed when merged.`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+  # Cleanup old images (optional job)
+  cleanup:
+    needs: docker
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref_name != github.event.repository.default_branch
+    permissions:
+      packages: write
+
+    steps:
+      - name: Delete old development images
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const response = await github.rest.packages.getAllPackageVersionsForPackageOwnedByOrg({
+              package_type: 'container',
+              package_name: context.repo.repo,
+              org: context.repo.owner,
+              per_page: 100
+            });
+            
+            const versions = response.data;
+            const devVersions = versions.filter(version => 
+              version.metadata.container.tags.some(tag => tag.startsWith('dev-') || tag.startsWith('pr-'))
+            );
+            
+            // Keep only the latest 10 dev/pr versions
+            const versionsToDelete = devVersions.slice(10);
+            
+            for (const version of versionsToDelete) {
+              try {
+                await github.rest.packages.deletePackageVersionForOrg({
+                  package_type: 'container',
+                  package_name: context.repo.repo,
+                  org: context.repo.owner,
+                  package_version_id: version.id
+                });
+                console.log(`Deleted version ${version.id}`);
+              } catch (error) {
+                console.log(`Failed to delete version ${version.id}: ${error.message}`);
+              }
+            }
