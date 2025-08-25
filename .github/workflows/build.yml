@@ -1,25 +1,49 @@
-name: Docker Build & Push to GHCR
+name: CI/CD Pipeline
 
 on:
   push:
-    branches:
-      - master
-      - main
-      - dev
+    branches: [dev, main, master]
   pull_request:
-    branches:
-      - master
-      - main
+    branches: [dev, main, master]
 
 env:
   REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  docker:
+  test:
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (adjust for your tech stack)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Run linting
+        run: npm run lint
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+
     permissions:
       contents: read
       packages: write
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
 
     steps:
       - name: Checkout code
@@ -28,7 +52,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GitHub Container Registry
+      - name: Log in to Container Registry
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -39,44 +63,60 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=prod-latest,enable={{is_default_branch}}
-            type=raw,value=prod-{{sha}},enable={{is_default_branch}}
-            type=raw,value=staging-latest,enable=${{ github.ref_name == 'main' && github.ref_name != github.event.repository.default_branch }}
-            type=raw,value=staging-{{sha}},enable=${{ github.ref_name == 'main' && github.ref_name != github.event.repository.default_branch }}
-            type=raw,value=dev-latest,enable=${{ github.ref_name == 'dev' }}
-            type=raw,value=dev-{{sha}},enable=${{ github.ref_name == 'dev' }}
-            type=ref,event=pr,prefix=pr-
-          labels: |
-            org.opencontainers.image.source=${{ github.event.repository.html_url }}
-            org.opencontainers.image.created={{date 'YYYY-MM-DDTHH:mm:ssZ'}}
-            org.opencontainers.image.revision={{sha}}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
         id: build
         uses: docker/build-push-action@v5
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Quick security check (Dockerfile lint)
-        if: github.event_name != 'pull_request'
-        uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: Dockerfile
-          format: tty
-          no-fail: true
+  deploy-dev:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
+    environment: development
 
-      - name: Build summary
-        if: always()
+    steps:
+      - name: Deploy to Development
         run: |
-          echo "## 🐳 Docker Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "**Repository**: ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Branch**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Tags**: ${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo "Deploying to development environment"
+          echo "Image: ${{ needs.build-and-push.outputs.image-tag }}"
+          # Add your deployment commands here
+          # kubectl set image deployment/myapp myapp=${{ needs.build-and-push.outputs.image-tag }}
+
+  deploy-staging:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: staging
+
+    steps:
+      - name: Deploy to Staging
+        run: |
+          echo "Deploying to staging environment"
+          echo "Image: ${{ needs.build-and-push.outputs.image-tag }}"
+          # Add your deployment commands here
+
+  deploy-production:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+    environment: production
+
+    steps:
+      - name: Deploy to Production
+        run: |
+          echo "Deploying to production environment"
+          echo "Image: ${{ needs.build-and-push.outputs.image-tag }}"
+          # Add your deployment commands here
